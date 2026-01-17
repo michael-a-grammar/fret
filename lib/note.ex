@@ -9,35 +9,43 @@ defmodule Fret.Note do
 
   @type octave :: 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8
 
+  @type frequency :: float()
+
   @type t :: %__MODULE__{
           name: note_name(),
           accidental: accidental(),
-          octave: octave()
+          octave: octave(),
+          frequency: frequency()
         }
 
   @type natural_note :: %__MODULE__{
           name: note_name(),
           accidental: :natural,
-          octave: octave()
+          octave: octave(),
+          frequency: frequency()
         }
 
   @type sharp_note :: %__MODULE__{
           name: sharp_note_name(),
           accidental: :sharp,
-          octave: octave()
+          octave: octave(),
+          frequency: frequency()
         }
 
   @type flat_note :: %__MODULE__{
           name: flat_note_name(),
           accidental: :flat,
-          octave: octave()
+          octave: octave(),
+          frequency: frequency()
         }
 
-  @type enharmonic_note :: {sharp_note(), flat_note()}
+  @type enharmonic_notes :: {sharp_note(), flat_note()}
 
-  @type note :: natural_note() | enharmonic_note()
+  @type note :: natural_note() | enharmonic_notes()
 
   @type notes :: nonempty_list(note())
+
+  @type query :: %{}
 
   @note_names [:c, :d, :e, :f, :g, :a, :b]
 
@@ -54,7 +62,7 @@ defmodule Fret.Note do
 
   @enforce_keys [:name, :accidental, :octave]
 
-  defstruct [:name, :accidental, :octave]
+  defstruct [:name, :accidental, :octave, :frequency]
 
   defguard is_natural_note(note)
            when is_struct(note, __MODULE__) and
@@ -88,8 +96,6 @@ defmodule Fret.Note do
                   is_sharp_note(note) or
                   is_flat_note(note) or
                   is_enharmonic_note(note)
-
-  def sigil_n(string, []), do: sigil_NOTE(string, [])
 
   def sigil_NOTE(string, []) do
     parse_accidental = fn accidental ->
@@ -150,7 +156,7 @@ defmodule Fret.Note do
          {:ok, accidental} <- parse_accidental.(accidental),
          {:ok, name} <- parse_name.(name, accidental),
          {:ok, octave} <- parse_octave.(octave) do
-      %__MODULE__{
+      %{
         name: name,
         accidental: accidental,
         octave: octave
@@ -164,8 +170,8 @@ defmodule Fret.Note do
     end
   end
 
-  @spec notes() :: notes()
-  def notes do
+  @spec get() :: notes()
+  def get do
     @octaves
     |> Enum.flat_map(fn octave ->
       @note_names
@@ -175,23 +181,23 @@ defmodule Fret.Note do
         [{:e, _} = e, {:f, _}] ->
           [e]
 
-        [note, next_note] ->
-          [note, {{note, :sharp}, {next_note, :flat}}]
+        [{name, octave}, {next_name, _}] ->
+          [{name, octave}, {name, next_name, octave}]
 
         b ->
           b
       end)
       |> Enum.filter(fn
-        {note_name, 0} when note_name not in [:a, :b] ->
+        {name, 0} when name not in [:a, :b] ->
           false
 
-        {{{note_name, 0}, _}, _} when note_name not in [:a, :b] ->
+        {name, _, 0} when name not in [:a, :b] ->
           false
 
-        {note_name, 8} when note_name != :c ->
+        {name, 8} when name != :c ->
           false
 
-        {{{_, 8}, _}, _} ->
+        {_, _, 8} ->
           false
 
         _ ->
@@ -203,24 +209,59 @@ defmodule Fret.Note do
 
       notes
       |> Enum.with_index(1)
-      |> Enum.each(fn
-        {_, index} = note ->
+      |> Enum.map(fn
+        {note, index} ->
           semitones_away_from_reference_note = index - reference_note_index
 
-          IO.inspect(
-            2 ** (semitones_away_from_reference_note / 12) * @reference_note_frequency,
-            label: "#{inspect(note)}"
-          )
+          frequency =
+            Float.round(
+              2 ** (semitones_away_from_reference_note / 12) * @reference_note_frequency,
+              2
+            )
+
+          case note do
+            {name, octave} ->
+              {name, octave, frequency}
+
+            {name, other_name, octave} ->
+              {name, other_name, octave, frequency}
+          end
       end)
-
-      notes
     end)
-    |> Enum.map(fn
-      {{{_, _} = note, accidental}, {{_, _} = next_note, next_accidental}} ->
-        {to_struct(note, accidental), to_struct(next_note, next_accidental)}
+    |> Enum.map(&new/1)
+  end
 
-      {_, _} = note ->
-        to_struct(note)
+  @spec find(query()) :: note()
+  def find(%{
+        name: name,
+        accidental: accidental,
+        octave: octave
+      }) do
+    Enum.find(get(), fn
+      %__MODULE__{
+        name: ^name,
+        accidental: ^accidental,
+        octave: ^octave
+      } ->
+        true
+
+      {%__MODULE__{
+         name: ^name,
+         accidental: ^accidental,
+         octave: ^octave
+       }, _} ->
+        true
+
+      {_,
+       %__MODULE__{
+         name: ^name,
+         accidental: ^accidental,
+         octave: ^octave
+       }} ->
+        true
+
+      _ ->
+        false
     end)
   end
 
@@ -234,49 +275,52 @@ defmodule Fret.Note do
   #   end)
   # end
 
-  @spec compare(notes(), note(), note()) :: :lt | :eq | :gt
-  def compare(notes, note1, note2) do
-    [note1_index, note2_index] =
-      [note1, note2]
-      |> Enum.map(&find_note_index(notes, &1))
+  @spec compare(query(), query()) :: :lt | :eq | :gt
+  def compare(query1, query2) do
+    [frequency1, frequency2] =
+      [query1, query2]
+      |> Enum.map(&find/1)
+      |> Enum.map(fn
+        %__MODULE__{
+          frequency: frequency
+        } ->
+          frequency
+
+        {%__MODULE__{
+           frequency: frequency
+         }, _} ->
+          frequency
+      end)
 
     cond do
-      note1_index < note2_index ->
+      frequency1 < frequency2 ->
         :lt
 
-      note1_index == note2_index ->
+      frequency1 == frequency2 ->
         :eq
 
-      note1_index > note2_index ->
+      frequency1 > frequency2 ->
         :gt
     end
   end
 
-  def find_note_index(notes, note) when is_natural_note(note) or is_enharmonic_note(note) do
-    Enum.find_index(notes, &(&1 == note))
+  defp new({name, other_name, octave, frequency}) do
+    {
+      new(name, :sharp, octave, frequency),
+      new(other_name, :flat, octave, frequency)
+    }
   end
 
-  def find_note_index(notes, %__MODULE__{} = note)
-      when is_sharp_note(note) or is_flat_note(note) do
-    notes
-    |> Enum.find(fn
-      {^note, _} ->
-        true
-
-      {_, ^note} ->
-        true
-
-      _ ->
-        false
-    end)
-    |> then(&find_note_index(notes, &1))
+  defp new({name, octave, frequency}) do
+    new(name, :natural, octave, frequency)
   end
 
-  defp to_struct({name, octave}, accidental \\ :natural) do
+  defp new(name, accidental, octave, frequency) do
     %__MODULE__{
       name: name,
       accidental: accidental,
-      octave: octave
+      octave: octave,
+      frequency: frequency
     }
   end
 end
